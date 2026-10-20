@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HMI Điều khiển động cơ - MQTT</title>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  :root{--bg:#f3f5f8;--card:#fff;--text:#1c2330;--muted:#6b7686;--line:#dde2ea;--green:#1fb356;--red:#e03131;--amber:#f59f00;--blue:#1c6ed5;--off:#c4cad4}
+  @media(prefers-color-scheme:dark){:root{--bg:#12161d;--card:#1b212b;--text:#e8ecf2;--muted:#8d98a8;--line:#2b3340;--off:#3a4350}}
+  *{box-sizing:border-box}
+  body{margin:0;padding:16px;font-family:system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
+  .wrap{max-width:960px;margin:auto;display:grid;gap:14px;grid-template-columns:1fr 1fr}
+  @media(max-width:760px){.wrap{grid-template-columns:1fr}}
+  h1{grid-column:1/-1;font-size:20px;margin:0}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .full{grid-column:1/-1}
+  label{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}
+  input{width:100%;padding:8px 46px 8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px}
+  input[readonly]{opacity:.85;cursor:not-allowed;font-weight:600}
+  .row{display:flex;gap:8px;align-items:flex-end}
+  .row .unit{flex:1}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}
+  .unit{position:relative}
+  .unit span{position:absolute;right:10px;bottom:9px;font-size:13px;color:var(--muted)}
+  button{padding:10px 14px;border:0;border-radius:8px;font-size:14px;font-weight:600;color:#fff;cursor:pointer;background:var(--blue)}
+  button:active{transform:scale(.97)}
+  .btns{display:flex;gap:10px}
+  .btns button{flex:1;padding:16px;font-size:16px}
+  #btnStart{background:var(--green)}#btnStop{background:var(--red)}#btnReset{background:var(--amber)}
+  .lamps{display:flex;gap:22px;justify-content:space-around}
+  .lamp{text-align:center;font-size:13px}
+  .lamp i{display:block;width:44px;height:44px;margin:0 auto 6px;border-radius:50%;background:var(--off);border:3px solid var(--line)}
+  .lamp.run i{background:var(--green);box-shadow:0 0 16px var(--green)}
+  .lamp.stop i{background:var(--red);box-shadow:0 0 16px var(--red)}
+  .lamp.error i{background:var(--amber);box-shadow:0 0 16px var(--amber);animation:blink .6s infinite}
+  @keyframes blink{50%{opacity:.35}}
+  .conn{display:flex;align-items:center;gap:8px;font-size:13px;margin-top:10px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--off)}
+  .dot.on{background:var(--green)}.dot.err{background:var(--red)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>HMI điều khiển động cơ</h1>
+
+  <!-- Đèn báo trạng thái -->
+  <div class="card full">
+    <h2>Trạng thái</h2>
+    <div class="lamps">
+      <div class="lamp" id="lampRun"><i></i>RUN</div>
+      <div class="lamp" id="lampStop"><i></i>STOP</div>
+      <div class="lamp" id="lampError"><i></i>ERROR</div>
+    </div>
+    <div class="conn"><span class="dot" id="connDot"></span><span id="connText">MQTT: chưa kết nối</span></div>
+  </div>
+
+  <!-- Nút điều khiển + ô nhập tốc độ đặt -->
+  <div class="card">
+    <h2>Điều khiển</h2>
+    <div class="btns">
+      <button id="btnStart">START</button>
+      <button id="btnStop">STOP</button>
+      <button id="btnReset">RESET</button>
+    </div>
+    <label for="setSpeed">Tốc độ đặt (cho phép nhập)</label>
+    <div class="row">
+      <div class="unit"><input id="setSpeed" type="number" min="0" step="1" placeholder="Nhập tốc độ..." /><span>rpm</span></div>
+      <button id="btnSetSpeed">Gửi</button>
+    </div>
+  </div>
+
+  <!-- Ô hiển thị (không cho nhập) -->
+  <div class="card">
+    <h2>Thông số hiện tại (chỉ đọc)</h2>
+    <label>Tốc độ thực tế</label>
+    <div class="unit"><input id="Speed" readonly value="0" /><span>rpm</span></div>
+    <div class="grid2">
+      <div><label>Điện áp</label><div class="unit"><input id="Voltage" readonly value="0.0" /><span>V</span></div></div>
+      <div><label>Dòng điện</label><div class="unit"><input id="Current" readonly value="0.00" /><span>A</span></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===== CẤU HÌNH MQTT ===== */
+const CFG = {
+  url: "wss://test.mosquitto.org:8081/mqtt", // broker qua WebSocket (ws:// hoặc wss://), không dùng cổng 1883
+  clientId: "",                              // "" = tự sinh ngẫu nhiên
+  username: "",                              // "" nếu broker không yêu cầu
+  password: "",                              // "" nếu broker không yêu cầu
+  topicCmd: "Inverter0/Command",             // gửi lệnh: <topicCmd>/Start, /Reset_error, /Setpoint_Speed
+  topicStatus: "Inverter0/Status",           // nhận dữ liệu: <topicStatus>/Speed, /Voltage, ...
+};
+
+const $ = (id) => document.getElementById(id);
+const log = (m) => console.log("[HMI] " + m);
+const isOn = (v) => v === "1" || v.toLowerCase() === "true";
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+let client, running = false, error = false;
+
+/* Đèn trạng thái: error (nhấp nháy) > run (xanh) > stop (đỏ) */
+function render() {
+  const s = error ? "error" : running ? "run" : "stop";
+  ["Run", "Stop", "Error"].forEach((n) => ($("lamp" + n).className = "lamp" + (s === n.toLowerCase() ? " " + s : "")));
+}
+
+/* Đèn kết nối: '' = xám, 'on' = xanh, 'err' = đỏ */
+function setConn(cls, text) {
+  $("connDot").className = "dot " + cls;
+  $("connText").textContent = "MQTT: " + text;
+}
+
+/* Mỗi topic nhận về <topicStatus>/<tên> ↔ một hàm xử lý */
+const handlers = {
+  Speed: (v) => ($("Speed").value = (+v).toFixed(1)),
+  Voltage: (v) => ($("Voltage").value = (+v).toFixed(1)),
+  Current: (v) => ($("Current").value = (+v).toFixed(2)),
+  Runing_Light: (v) => { running = isOn(v); render(); },
+  Error_Light: (v) => { error = isOn(v); render(); },
+};
+
+/* Nhận dữ liệu MQTT */
+function onMessage(topic, payload) {
+  const value = payload.toString().trim();
+  log(`nhận: ${topic} = ${value}`);
+  handlers[topic.split("/").pop()]?.(value);
+}
+
+/* Gửi lệnh MQTT */
+function sendCmd(name, value) {
+  if (!client?.connected) return log("Chưa kết nối MQTT, không gửi được.");
+  client.publish(`${CFG.topicCmd}/${name}`, String(value));
+}
+
+/* Tự động kết nối khi mở trang */
+function connectMqtt() {
+  if (!CFG.url || !CFG.topicCmd || !CFG.topicStatus) return setConn("err", "chưa cấu hình (điền CFG trong code)");
+  setConn("", "đang kết nối...");
+  client = mqtt.connect(CFG.url, {
+    clientId: CFG.clientId || "hmi_" + Math.random().toString(16).slice(2, 8),
+    username: CFG.username || undefined,
+    password: CFG.password || undefined,
+    reconnectPeriod: 3000, // tự kết nối lại sau 3 giây
+    connectTimeout: 8000,
+  });
+  client
+    .on("connect", () => {
+      setConn("on", "đã kết nối");
+      client.subscribe(Object.keys(handlers).map((k) => `${CFG.topicStatus}/${k}`), (e) => e && log("Lỗi subscribe: " + e.message));
+    })
+    .on("message", onMessage)
+    .on("reconnect", () => setConn("", "đang kết nối lại..."))
+    .on("close", () => setConn("err", "mất kết nối"))
+    .on("error", (e) => { setConn("err", "lỗi kết nối"); log("Lỗi: " + e.message); });
+}
+
+/* Nút điều khiển */
+$("btnStart").onclick = () => sendCmd("Start", 1);
+$("btnStop").onclick = () => sendCmd("Start", 0);
+$("btnReset").onclick = async () => {
+  sendCmd("Reset_error", 1);
+  await delay(1000);
+  sendCmd("Reset_error", 0);
+};
+$("btnSetSpeed").onclick = () => {
+  const v = parseFloat($("setSpeed").value);
+  if (isNaN(v) || v < 0) return log("Tốc độ đặt không hợp lệ.");
+  sendCmd("Setpoint_Speed", v);
+};
+
+render(); // trạng thái ban đầu: STOP
+connectMqtt();
+</script>
+</body>
+</html>
